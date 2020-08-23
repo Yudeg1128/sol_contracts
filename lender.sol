@@ -141,7 +141,7 @@ contract Lender {
     function reimburse() payable external {
         nowTime();
         nowThisBalance();
-        require(msg.sender == _loan.borrower, 'only borrower can reimburse');
+        require(msg.sender == owner, 'only owner can reimburse');
         require(_nowTime > _loan.end, 'loan has not matured yet');
         if(_nowTime >= _loan.end + 300) { 
             _overdue_fee = _loan.amount * 1/100 * (_nowTime - _loan.end - 300) / 300;
@@ -155,7 +155,7 @@ contract Lender {
             MDC.transfer(owner, _loan.amount + _loan.interest);
         }
     }
-    //change all 300 to 86400 in production
+    //change all 3 to 86400 in production
     function _transitionTo(State to) internal {
       require(to != State.PENDING, 'cannot go back to pending');
       require(to != _loan.currentState, 'cannot transition to same state');
@@ -163,7 +163,7 @@ contract Lender {
         require(_loan.currentState == State.PENDING, 'can only go to active from pending');
         loans[_loan.borrower][CurrentLoanIndex].currentState = State.ACTIVE;
         loans[_loan.borrower][CurrentLoanIndex].start = block.timestamp;
-        loans[_loan.borrower][CurrentLoanIndex].end = block.timestamp + (_loan.duration * 300);
+        loans[_loan.borrower][CurrentLoanIndex].end = block.timestamp + (_loan.duration * 3);
         selectLoan(_loan.borrower, CurrentLoanIndex);
       }
       else if(to == State.CLOSED) {
