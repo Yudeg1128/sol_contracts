@@ -9,7 +9,9 @@ contract Lender {
     
     address private owner; 
     MidasCoin private MDC;
-    uint private overdue_fee;
+    uint private _overdue_fee;
+    uint private _nowTime;
+    uint private _nowThisBalance;
 
     constructor(
         MidasCoin _stablecoin_address
@@ -46,6 +48,14 @@ contract Lender {
     mapping (address => Loan[]) internal loans;
     address[] internal borrowerAccounts;
     
+    function nowTime() internal returns(uint) {
+        _nowTime = block.timestamp;
+    }
+    
+    function nowThisBalance() internal returns(uint) {
+        _nowThisBalance = MDC.balanceOf(address(this));
+    }
+    
     function borrowerIsNew(address payable _borrower) view internal returns(bool) {
         for(uint i = 0; i < borrowerAccounts.length; i++){
             if(borrowerAccounts[i] == _borrower){
@@ -53,16 +63,24 @@ contract Lender {
         } 
         return true;
     }
-    
+    //change all 300 to 86400 in production
+    function checkOverdue() public  {
+        require(msg.sender == owner, 'only owner can check overdue loans');
+        for(uint i = 0; i < borrowerAccounts.length; i++){
+            for (uint j = 0; j < loans[borrowerAccounts[i]].length; j++){
+                if(block.timestamp > loans[borrowerAccounts[i]][j].end + 300 && loans[borrowerAccounts[i]][j].currentState == State.ACTIVE){
+                    _loan = loans[borrowerAccounts[i]][j];
+                    CurrentLoanIndex = _loan.id;
+                    _transitionTo(State.OVERDUE);
+                }
+            }
+        }
+    }
+
     function createBorrower(address payable _borrower) public {
         require(msg.sender == owner, 'only owner can create new borrower');
         require(borrowerIsNew(_borrower) == true, 'borrower already exists');            
         borrowerAccounts.push(_borrower);
-    }
-
-    function viewBorrowers() view public returns(address[] memory) {
-        require(msg.sender == owner, 'only owner can create view borrowers');
-        return borrowerAccounts;
     }
 
     function createLoan(uint _amount, uint _interest, uint _duration, address payable _borrower) public {
@@ -77,65 +95,67 @@ contract Lender {
         CurrentLoanIndex = _loan.id;
     }
 
-    function viewLoans(address payable _borrower) view public returns(Loan[] memory) {
-        require(msg.sender == owner, 'only owner can view loans');
-        require(borrowerIsNew(_borrower) == false, 'borrower does not exists');
-        return loans[_borrower];
-    }
-    
     function selectLoan(address payable _borrower, uint _id) public {
         require(msg.sender == owner || msg.sender == _borrower, 'only owner or borrower can select current loan');
         require(borrowerIsNew(_borrower) == false, 'borrower does not exists');
         _loan = loans[_borrower][_id];
         CurrentLoanIndex = _loan.id;
     }
-    
+
+    function viewBorrowers() view public returns(address[] memory) {
+        if(msg.sender == owner){
+            return borrowerAccounts;
+        }
+        else{}
+    }
+
+    function viewLoans(address payable _borrower) view public returns(Loan[] memory) {
+        if(msg.sender == owner && borrowerIsNew(_borrower) == false){
+            return loans[_borrower];
+        }
+        else{}
+    }
+
     function checkCurrentLoan() view public returns (Loan memory){
-        require(msg.sender == owner, 'only owner can check current loan');
-        return _loan;
+        if(msg.sender == owner){
+            return _loan;
+        }
+        else{}
     }
     
     function viewOverdueLoans() view public returns (Loan[] memory) {
-        return overdue_loans;
+        if(msg.sender == owner){
+            return overdue_loans;
+        }
+        else{}
     }
     
     function fund() payable external {
-        uint funding_amount = _loan.amount;
-        address payable _borrower = _loan.borrower;
-        require(msg.sender == owner, 'only owner can lend');
-        require(MDC.balanceOf(owner) >= funding_amount, 'lender account balance not enough');
+        nowThisBalance();
+        require(msg.sender == owner, 'only owner can lend from contract');
+        require(_nowThisBalance >= _loan.amount, 'lender contract account balance not enough');
         _transitionTo(State.ACTIVE);
-        MDC.transferFrom(owner, _borrower, funding_amount);
+        MDC.transfer(_loan.borrower, _loan.amount);
     }
-        
+    //change all 300 to 86400 in production
     function reimburse() payable external {
+        nowTime();
+        nowThisBalance();
         require(msg.sender == _loan.borrower, 'only borrower can reimburse');
-        require(MDC.balanceOf(_loan.borrower) >= _loan.amount + _loan.interest, 'borrower balance less than amount + interest');
-        _transitionTo(State.CLOSED);
-        MDC.transferFrom(_loan.borrower, owner, _loan.amount + _loan.interest);
-    }
-    
-    function check_overdue() payable external {
-        require(msg.sender == owner, 'only owner can check overdue loans');
-        for(uint i = 0; i < borrowerAccounts.length; i++){
-            for (uint j = 0; j < loans[borrowerAccounts[i]].length; j++){
-                if(block.timestamp > (loans[borrowerAccounts[i]][j].end + 8) && loans[borrowerAccounts[i]][j].currentState == State.ACTIVE){
-                    _loan = loans[borrowerAccounts[i]][j];
-                    CurrentLoanIndex = _loan.id;
-                    _transitionTo(State.OVERDUE);
-                }
-            }
+        require(_nowTime > _loan.end, 'loan has not matured yet');
+        if(_nowTime >= _loan.end + 300) { 
+            _overdue_fee = _loan.amount * 1/100 * (_nowTime - _loan.end - 300) / 300;
+            require(_nowThisBalance >= _loan.amount + _loan.interest + _overdue_fee, 'contract balance less than reimburse amount and overdue');
+            _transitionTo(State.OVERDUECLOSED);
+            MDC.transfer(owner, _loan.amount + _loan.interest + _overdue_fee);
+        }
+        else if(_nowTime < _loan.end + 300) {
+            require(_nowThisBalance >= _loan.amount + _loan.interest, 'contract balance less than reimburse amount and int');
+            _transitionTo(State.CLOSED);
+            MDC.transfer(owner, _loan.amount + _loan.interest);
         }
     }
-    
-    function reimburse_overdue() payable external {
-        overdue_fee = _loan.amount * 1/100 * (block.timestamp - _loan.end) / 86400;
-        require(msg.sender == _loan.borrower, 'only borrower can reimburse');
-        require(MDC.balanceOf(_loan.borrower) >= _loan.amount + _loan.interest + overdue_fee, 'borrower balance less than amount + interest + overdue_fee');
-        _transitionTo(State.OVERDUECLOSED);
-        MDC.transferFrom(_loan.borrower, owner, _loan.amount + _loan.interest + overdue_fee);
-    }
-
+    //change all 300 to 86400 in production
     function _transitionTo(State to) internal {
       require(to != State.PENDING, 'cannot go back to pending');
       require(to != _loan.currentState, 'cannot transition to same state');
@@ -143,12 +163,11 @@ contract Lender {
         require(_loan.currentState == State.PENDING, 'can only go to active from pending');
         loans[_loan.borrower][CurrentLoanIndex].currentState = State.ACTIVE;
         loans[_loan.borrower][CurrentLoanIndex].start = block.timestamp;
-        loans[_loan.borrower][CurrentLoanIndex].end = block.timestamp + (_loan.duration * 86400);
+        loans[_loan.borrower][CurrentLoanIndex].end = block.timestamp + (_loan.duration * 300);
         selectLoan(_loan.borrower, CurrentLoanIndex);
       }
       else if(to == State.CLOSED) {
         require(_loan.currentState == State.ACTIVE, 'can only go to closed from active or overdue');
-        require(block.timestamp >= _loan.end, 'loan hasnt matured yet');
         loans[_loan.borrower][CurrentLoanIndex].paid = block.timestamp;
         loans[_loan.borrower][CurrentLoanIndex].currentState = State.CLOSED;
         selectLoan(_loan.borrower, CurrentLoanIndex);
