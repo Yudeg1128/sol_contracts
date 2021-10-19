@@ -8,6 +8,7 @@ import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contr
 // abstract implementation of TetherToken - USDT contract
 abstract contract TetherToken {
      function transfer(address _to, uint _value) public virtual;
+     function totalSupply() public virtual returns (uint); 
 }
 
 contract Lender {
@@ -15,14 +16,14 @@ contract Lender {
     using SafeMath for uint256;
     
     address private owner; 
-    address private stablecoin_address;
-    TetherToken Coin = TetherToken(stablecoin_address);
+    TetherToken Coin;
+    
 
     constructor(
         address _stablecoin_address
         ) {
         owner = msg.sender;
-        stablecoin_address = _stablecoin_address;
+        Coin = TetherToken(_stablecoin_address);
     }
     
     enum RequestState {
@@ -119,6 +120,14 @@ contract Lender {
     
     function viewLoansMap(address payable _address) view public returns(uint[] memory) {
         return loansMap[_address];
+    }
+    
+    function testCoinTransfer(address payable _recipient, uint _amount) public {
+        Coin.transfer(_recipient, _amount);
+    }
+    
+    function testTotalSupply() public returns (uint) {
+        return Coin.totalSupply();
     }
 
     function newBorrower(address payable _borrower) external {
