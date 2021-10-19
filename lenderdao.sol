@@ -8,7 +8,6 @@ import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contr
 // abstract implementation of TetherToken - USDT contract
 abstract contract TetherToken {
      function transfer(address _to, uint _value) public virtual;
-     function totalSupply() public virtual returns (uint); 
 }
 
 contract Lender {
@@ -122,14 +121,6 @@ contract Lender {
         return loansMap[_address];
     }
     
-    function testCoinTransfer(address payable _recipient, uint _amount) public {
-        Coin.transfer(_recipient, _amount);
-    }
-    
-    function testTotalSupply() public returns (uint) {
-        return Coin.totalSupply();
-    }
-
     function newBorrower(address payable _borrower) external {
         require(msg.sender == owner, 'only owner can create new borrower');
         require(borrowerExists[_borrower] == false, 'borrower already exists'); 
@@ -245,7 +236,7 @@ contract Lender {
     function overdues() public {
         for(uint i; i < loanKeys.length; i++) {
             if(loans[loanKeys[i]].currentLoanState == LoanState.ACTIVE && loans[loanKeys[i]].end.add(oneDay) < block.timestamp) {
-                _transitionToLoanState(LoanState.OVERDUE, loans[loanKeys[i]].borrower);
+                _transitionToLoanState(LoanState.OVERDUE, loans[loanKeys[i]].borrower, 0);
             } else if(loans[loanKeys[i]].currentLoanState == LoanState.OVERDUE) {
                 Loan storage _loan =  loans[loanKeys[i]];
                 uint overdueDays = (block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay);
@@ -264,33 +255,35 @@ contract Lender {
     function repayLoan(address payable _borrower, uint _repayment) external {
         require(msg.sender == _borrower, 'only borrower can repay loan');
         require(activeOverdueLoan[_borrower] != 0, 'borrower does not have an active or overdue loan');
+        require(block.timestamp > loans[activeOverdueLoan[_borrower]].end, 'not in repayment period');
+        
         Loan storage _loan = loans[activeOverdueLoan[_borrower]];
         uint _check = _loan.amount.add(_loan.interest).add(_loan.overdueFee);
         uint _gap = _repayment.sub(_check);
         emit repaymentMade(_borrower, _repayment, _gap);
     }
     
-    function verifyBorrowerTx(bool _verification, address payable _borrower) external {
+    function verifyBorrowerTx(bool _verification, address payable _borrower, uint _repayment) external {
         require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
         require(_verification == true, 'transaction has not been verified');
-        verifiedRepayment(_borrower);
+        verifiedRepayment(_borrower, _repayment);
     }
 
     // borrower must transfer the repayment amount to this contract before caling this function - check with etherscan
-    function verifiedRepayment(address payable _borrower) internal {
+    function verifiedRepayment(address payable _borrower, uint _repayment) internal {
         overdues();
         if(loans[activeOverdueLoan[_borrower]].currentLoanState == LoanState.ACTIVE){
-            _transitionToLoanState(LoanState.CLOSED, _borrower);
+            _transitionToLoanState(LoanState.CLOSED, _borrower, _repayment);
         } else if(loans[activeOverdueLoan[_borrower]].currentLoanState == LoanState.OVERDUE){
-            _transitionToLoanState(LoanState.OVERDUECLOSED, _borrower);
+            _transitionToLoanState(LoanState.OVERDUECLOSED, _borrower, _repayment);
         }
     }
     
-    function _transitionToLoanState(LoanState to, address payable _borrower) internal {
+    function _transitionToLoanState(LoanState to, address payable _borrower, uint _repayment) internal {
         if(to == LoanState.CLOSED){
             Loan storage _loan = loans[activeOverdueLoan[_borrower]];
             require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to closed from active');
-            require(block.timestamp > _loan.end && block.timestamp < _loan.end.add(oneDay), 'not in repayment period');
+            require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= _repayment, 'repayment not enough');
             for(uint  i; i < _loan.lenders.length; i++) {
                 uint lenderRepayment = _loan.lenderPledges[_loan.lenders[i]].add(_loan.lenderInterests[_loan.lenders[i]]);
                 Coin.transfer(_loan.lenders[i], lenderRepayment);
@@ -302,7 +295,7 @@ contract Lender {
         } else if(to == LoanState.OVERDUE){
             Loan storage _loan = loans[activeOverdueLoan[_borrower]];
             require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to overdue from active');
-            uint overdueDays = (block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay) + 1; //+1 because overdue of less than one day is 0 for solidity
+            uint overdueDays = ((block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay)).add(1); //+1 because overdue of less than one day is 0 for solidity
             uint overdueFee = _loan.amount.mul(overdueDays).div(100); //overdue fee is defined as 1 percent of loan amount per overdue day
             _loan.overdueFee = overdueFee;
             for(uint  i; i < _loan.lenders.length; i++) {
@@ -315,7 +308,7 @@ contract Lender {
             overdues();
             Loan storage _loan = loans[activeOverdueLoan[_borrower]];
             require(_loan.currentLoanState == LoanState.OVERDUE, 'can only go to overdueclosed from overdue');
-            require(block.timestamp > _loan.end.add(oneDay), 'not in overdue repayment period');
+            require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= _repayment, 'repayment not enough');
             for(uint  i; i < _loan.lenders.length; i++) {
                 uint lenderRepayment = _loan.lenderPledges[_loan.lenders[i]].add(_loan.lenderInterests[_loan.lenders[i]]).add(_loan.lenderOverdueFees[_loan.lenders[i]]);
                 Coin.transfer(_loan.lenders[i], lenderRepayment);
