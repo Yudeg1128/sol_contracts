@@ -74,7 +74,7 @@ contract Lender {
     uint[] loanKeys;
     address[] borrowerKeys;
     address[] lenderKeys;
-    uint oneDay = 180; //use 86400 seconds for 24 hours
+    uint oneDay = 600; //use 86400 seconds for 24 hours
     mapping (address => uint) public activeOverdueLoan;
 
     function viewLoans() view public returns(uint[] memory) {
@@ -153,45 +153,68 @@ contract Lender {
         _request.currentRequestState = RequestState.PENDING;
     }
     
-    event newPledgeMade(address payable _borrower, address _lender, uint _pledgeAmount);
+    event newPledgeMade(address payable _borrower, address _lender, uint _acceptedPledge, bool _requestFilled);
     
     function newPledge(address payable _borrower, uint _increment) external {
         require(requests[_borrower].currentRequestState == RequestState.PENDING, 'can only pledge to pending requests');
         require(borrowerExists[_borrower] == true, 'borrower does not exists'); 
         require(_increment > 0, 'must pledge a positive amount');
+        
+        Request storage _request = requests[_borrower];
+        uint _gap = _request.amount.sub(_request.pledge);
         address _lender = msg.sender;
-        emit newPledgeMade(_borrower, _lender, _increment);
+
+        if(_gap > _increment) {
+            emit newPledgeMade(_borrower, _lender, _increment, false);
+        } else {
+            _transitionToRequestState(RequestState.FILLED, _borrower);
+            emit newPledgeMade(_borrower, _lender, _gap, true);
+        }
     }
     
+    // lender must transfer the pledge amount to lender contract before calling this function - check with etherscan
     function verifyLenderTx(bool _verification, address payable _borrower, address payable _lender, uint _increment) external {
         require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
         require(_verification == true, 'transaction has not been verified');
-        verifiedPledge(_borrower, _lender, _increment);
-    }
-
-    // lender must transfer the pledge amount to lender contract before calling this function - check with etherscan
-    function verifiedPledge(address payable _borrower, address payable _lender, uint _increment) internal {
         Request storage _request = requests[_borrower];
-        uint _gap = _request.amount.sub(_request.pledge);
-        if(_gap > _increment) {
-            _request.pledge = _request.pledge.add(_increment);
-            _request.lenders.push(_lender);
-            _request.lenderPledges[_lender] = _increment;
-            _request.lenderInterests[_lender] =  _increment.mul(100).div(_request.amount).mul(_request.interest).div(100); //*100 and /100 because solidity only has integers
-        } else {
-            _request.pledge += _gap;
-            _request.lenders.push(_lender);
-            _request.lenderPledges[_lender] = _gap;
-            _request.lenderInterests[_lender] =  _gap.mul(100).div(_request.amount).mul(_request.interest).div(100); //*100 and /100 because solidity only has integers
-            _transitionToRequestState(RequestState.FILLED, _borrower);
-        }
-        if(lenderExists[_lender] == false){
+        _request.pledge = _request.pledge.add(_increment);
+        _request.lenders.push(_lender);
+        _request.lenderPledges[_lender] = _increment;
+        _request.lenderInterests[_lender] =  _increment.mul(100).div(_request.amount).mul(_request.interest).div(100); //*100 and /100 because solidity only has integers
+        if(!lenderExists[_lender]){
             lenderKeys.push(_lender);
             lenderExists[_lender] = true;
         }
     }
+
+    // had to chop up the direct transition call from verifiedPledge because it was too large for block size
+    // application should call this only if event newPledgeMade returned _requestFilled as true AFTER calling verifyLenderTx
+    function newLoan(address payable _borrower) external {
+        require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
+        uint _index = loanKeys.length+1; //+1 because 0 stands for null in solidity and loan with id 0 would not 'exist'
+        loanKeys.push(_index);
+        loansMap[_borrower].push(_index);
+        Request storage _request = requests[_borrower];
+        Loan storage _loan = loans[_index];
+        _loan.borrower = _request.borrower;
+        _loan.lenders = _request.lenders;
+        for(uint  i; i < _request.lenders.length; i++) {
+            _loan.lenderPledges[_request.lenders[i]] = _request.lenderPledges[_request.lenders[i]];
+            _loan.lenderInterests[_request.lenders[i]] = _request.lenderInterests[_request.lenders[i]];
+            loansMap[_request.lenders[i]].push(_index);
+        }
+        _loan.amount = _request.amount;
+        _loan.tenor = _request.tenor;
+        _loan.interest = _request.interest;
+        _loan.overdueFee = 0;
+        _loan.start = block.timestamp;
+        _loan.end = block.timestamp + _request.tenor;
+        _loan.currentLoanState = LoanState.ACTIVE;
+        Coin.transfer(_borrower, _request.amount);
+        borrowerActiveOverdue(_borrower);
+    }
     
-    function closeRequest(address payable _borrower) public {
+    function closeRequest(address payable _borrower) external {
         require(msg.sender == _borrower || msg.sender == owner, 'only borrower or owner can close pledges');
         Request storage _request = requests[_borrower];
         if(_request.lenders.length > 0){
@@ -207,26 +230,6 @@ contract Lender {
         if(to == RequestState.FILLED) {
             require(_request.currentRequestState == RequestState.PENDING, 'can only go to filled from pending');
             _request.currentRequestState = RequestState.FILLED;
-            uint _index = loanKeys.length+1; //+1 because 0 stands for null in solidity and loan with id 0 would not 'exist'
-            loanKeys.push(_index);
-            loansMap[_borrower].push(_index);
-            Loan storage _loan = loans[_index];
-            _loan.borrower = _request.borrower;
-            _loan.lenders = _request.lenders;
-            for(uint  i; i < _request.lenders.length; i++) {
-                _loan.lenderPledges[_request.lenders[i]] = _request.lenderPledges[_request.lenders[i]];
-                _loan.lenderInterests[_request.lenders[i]] = _request.lenderInterests[_request.lenders[i]];
-                loansMap[_request.lenders[i]].push(_index);
-            }
-            _loan.amount = _request.amount;
-            _loan.tenor = _request.tenor;
-            _loan.interest = _request.interest;
-            _loan.overdueFee = 0;
-            _loan.start = block.timestamp;
-            _loan.end = block.timestamp + _request.tenor;
-            _loan.currentLoanState = LoanState.ACTIVE;
-            Coin.transfer(_borrower, _request.amount);
-            borrowerActiveOverdue(_borrower);
         } else if (to == RequestState.CLOSED) {
             _request.currentRequestState = RequestState.CLOSED;
         }
@@ -263,14 +266,10 @@ contract Lender {
         emit repaymentMade(_borrower, _repayment, _gap);
     }
     
+    // borrower must transfer the repayment amount to this contract before caling this function - check with etherscan
     function verifyBorrowerTx(bool _verification, address payable _borrower, uint _repayment) external {
         require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
         require(_verification == true, 'transaction has not been verified');
-        verifiedRepayment(_borrower, _repayment);
-    }
-
-    // borrower must transfer the repayment amount to this contract before caling this function - check with etherscan
-    function verifiedRepayment(address payable _borrower, uint _repayment) internal {
         overdues();
         if(loans[activeOverdueLoan[_borrower]].currentLoanState == LoanState.ACTIVE){
             _transitionToLoanState(LoanState.CLOSED, _borrower, _repayment);
@@ -290,8 +289,7 @@ contract Lender {
             }
             _loan.currentLoanState = LoanState.CLOSED;
             borrowerActiveOverdue(_borrower);
-            Request storage _request = requests[_borrower];
-            _request.currentRequestState = RequestState.CLOSED;
+            _transitionToRequestState(RequestState.CLOSED, _borrower);
         } else if(to == LoanState.OVERDUE){
             Loan storage _loan = loans[activeOverdueLoan[_borrower]];
             require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to overdue from active');
@@ -305,7 +303,6 @@ contract Lender {
             _loan.currentLoanState = LoanState.OVERDUE;
             borrowerActiveOverdue(_borrower);
         } else if(to == LoanState.OVERDUECLOSED){
-            overdues();
             Loan storage _loan = loans[activeOverdueLoan[_borrower]];
             require(_loan.currentLoanState == LoanState.OVERDUE, 'can only go to overdueclosed from overdue');
             require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= _repayment, 'repayment not enough');
@@ -315,8 +312,7 @@ contract Lender {
             }
             _loan.currentLoanState = LoanState.OVERDUECLOSED;
             borrowerActiveOverdue(_borrower);
-            Request storage _request = requests[_borrower];
-            _request.currentRequestState = RequestState.CLOSED;
+            _transitionToRequestState(RequestState.CLOSED, _borrower);
         }
     }
 }
