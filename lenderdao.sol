@@ -185,12 +185,16 @@ contract Lender {
             lenderKeys.push(_lender);
             lenderExists[_lender] = true;
         }
+        if(_request.currentRequestState == RequestState.FILLED) {
+            newLoan(_borrower);
+        }
     }
 
     // had to chop up the direct transition call from verifiedPledge because it was too large for block size
     // application should call this only if event newPledgeMade returned _requestFilled as true AFTER calling verifyLenderTx
-    function newLoan(address payable _borrower) external {
+    function newLoan(address payable _borrower) internal {
         require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
+        require(activeOverdueLoan[_borrower] == 0, 'borrower already has an active or overdue loan');
         uint _index = loanKeys.length+1; //+1 because 0 stands for null in solidity and loan with id 0 would not 'exist'
         loanKeys.push(_index);
         loansMap[_borrower].push(_index);
@@ -253,13 +257,12 @@ contract Lender {
         }
     }
 
-    event repaymentMade(address payable _borrower, uint _repayment, uint _gap);
+    event repaymentMade(address _borrower, uint _repayment, uint _gap);
     
-    function repayLoan(address payable _borrower, uint _repayment) external {
-        require(msg.sender == _borrower, 'only borrower can repay loan');
+    function repayLoan(uint _repayment) external {
+        address _borrower = msg.sender;
         require(activeOverdueLoan[_borrower] != 0, 'borrower does not have an active or overdue loan');
         require(block.timestamp > loans[activeOverdueLoan[_borrower]].end, 'not in repayment period');
-        
         Loan storage _loan = loans[activeOverdueLoan[_borrower]];
         uint _check = _loan.amount.add(_loan.interest).add(_loan.overdueFee);
         uint _gap = _repayment.sub(_check);
