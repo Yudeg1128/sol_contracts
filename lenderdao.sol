@@ -190,8 +190,6 @@ contract Lender {
         }
     }
 
-    // had to chop up the direct transition call from verifiedPledge because it was too large for block size
-    // application should call this only if event newPledgeMade returned _requestFilled as true AFTER calling verifyLenderTx
     function newLoan(address payable _borrower) internal {
         require(msg.sender == owner, 'only owner can verify borrower or lender transactions');
         require(activeOverdueLoan[_borrower] == 0, 'borrower already has an active or overdue loan');
