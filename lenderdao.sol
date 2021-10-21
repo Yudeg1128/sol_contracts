@@ -246,7 +246,7 @@ contract Lender {
                 _transitionToLoanState(LoanState.OVERDUE, loans[loanKeys[i]].borrower, 0);
             } else if(loans[loanKeys[i]].currentLoanState == LoanState.OVERDUE) {
                 Loan storage _loan =  loans[loanKeys[i]];
-                uint overdueDays = (block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay);
+                uint overdueDays = ((block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay)).add(1); //+1 because overdue of less than one day is 0 for solidity
                 uint overdueFee = _loan.amount.mul(overdueDays).div(100); //overdue fee is defined as 1 percent of loan amount per overdue day
                 _loan.overdueFee = overdueFee;
                 for(uint  j; j < _loan.lenders.length; j++) {
