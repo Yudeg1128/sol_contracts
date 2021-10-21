@@ -17,7 +17,6 @@ contract Lender {
     
     address private owner; 
     TetherToken Coin;
-    
 
     constructor(
         address _stablecoin_address
@@ -238,6 +237,17 @@ contract Lender {
             _request.currentRequestState = RequestState.CLOSED;
         }
     }
+
+    function setOverdueFees(address payable _borrower) internal {
+        Loan storage _loan = loans[activeOverdueLoan[_borrower]];
+        uint overdueDays = ((block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay)).add(1); //+1 because overdue of less than one day is 0 for solidity
+        uint overdueFee = _loan.amount.mul(overdueDays).div(100); //overdue fee is defined as 1 percent of loan amount per overdue day
+        _loan.overdueFee = overdueFee;
+        for(uint  i; i < _loan.lenders.length; i++) {
+            uint lenderOverdueFee = _loan.lenderPledges[_loan.lenders[i]].mul(100).div(_loan.amount).mul(_loan.overdueFee).div(100); //*100 and /100 because solidity only has integers
+            _loan.lenderOverdueFees[_loan.lenders[i]] = lenderOverdueFee;
+        }
+    }
         
     // this is the only way to transition to overdue and update overdue fees - should be called at regular intervals to keep fees updated
     function overdues() public {
@@ -246,13 +256,7 @@ contract Lender {
                 _transitionToLoanState(LoanState.OVERDUE, loans[loanKeys[i]].borrower, 0);
             } else if(loans[loanKeys[i]].currentLoanState == LoanState.OVERDUE) {
                 Loan storage _loan =  loans[loanKeys[i]];
-                uint overdueDays = ((block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay)).add(1); //+1 because overdue of less than one day is 0 for solidity
-                uint overdueFee = _loan.amount.mul(overdueDays).div(100); //overdue fee is defined as 1 percent of loan amount per overdue day
-                _loan.overdueFee = overdueFee;
-                for(uint  j; j < _loan.lenders.length; j++) {
-                    uint lenderOverdueFee = _loan.lenderPledges[_loan.lenders[j]].mul(100).div(_loan.amount).mul(_loan.overdueFee).div(100); //*100 and /100 because solidity only has integers
-                    _loan.lenderOverdueFees[_loan.lenders[j]] = lenderOverdueFee;
-                }
+                setOverdueFees(_loan.borrower);
             }
         }
     }
@@ -282,42 +286,27 @@ contract Lender {
     }
     
     function _transitionToLoanState(LoanState to, address payable _borrower, uint _repayment) internal {
-        if(to == LoanState.CLOSED){
-            Loan storage _loan = loans[activeOverdueLoan[_borrower]];
-            require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to closed from active');
+        Loan storage _loan = loans[activeOverdueLoan[_borrower]];
+        if(to == LoanState.CLOSED || to == LoanState.OVERDUECLOSED){
+            if(to == LoanState.CLOSED){
+                require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to closed from active');
+                _loan.currentLoanState = LoanState.CLOSED;
+            } else if(to == LoanState.OVERDUECLOSED){
+                require(_loan.currentLoanState == LoanState.OVERDUE, 'can only go to overdueclosed from overdue');
+                _loan.currentLoanState = LoanState.OVERDUECLOSED;
+            }
             require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= _repayment, 'repayment not enough');
             require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= Coin.balanceOf(address(this)), 'lender contract balance not enough');
             for(uint  i; i < _loan.lenders.length; i++) {
-                uint lenderRepayment = _loan.lenderPledges[_loan.lenders[i]].add(_loan.lenderInterests[_loan.lenders[i]]);
-                Coin.transfer(_loan.lenders[i], lenderRepayment);
-            }
-            _loan.currentLoanState = LoanState.CLOSED;
-            borrowerActiveOverdue(_borrower);
-            _transitionToRequestState(RequestState.CLOSED, _borrower);
-        } else if(to == LoanState.OVERDUE){
-            Loan storage _loan = loans[activeOverdueLoan[_borrower]];
-            require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to overdue from active');
-            uint overdueDays = ((block.timestamp.sub(_loan.end).sub(oneDay)).div(oneDay)).add(1); //+1 because overdue of less than one day is 0 for solidity
-            uint overdueFee = _loan.amount.mul(overdueDays).div(100); //overdue fee is defined as 1 percent of loan amount per overdue day
-            _loan.overdueFee = overdueFee;
-            for(uint  i; i < _loan.lenders.length; i++) {
-                uint lenderOverdueFee = _loan.lenderPledges[_loan.lenders[i]].mul(100).div(_loan.amount).mul(_loan.overdueFee).div(100); //*100 and /100 because solidity only has integers
-                _loan.lenderOverdueFees[_loan.lenders[i]] = lenderOverdueFee;
-            }
-            _loan.currentLoanState = LoanState.OVERDUE;
-            borrowerActiveOverdue(_borrower);
-        } else if(to == LoanState.OVERDUECLOSED){
-            Loan storage _loan = loans[activeOverdueLoan[_borrower]];
-            require(_loan.currentLoanState == LoanState.OVERDUE, 'can only go to overdueclosed from overdue');
-            require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= _repayment, 'repayment not enough');
-            require(_loan.amount.add(_loan.interest).add(_loan.overdueFee) <= Coin.balanceOf(address(this)), 'lender contract balance not enough');
-           for(uint  i; i < _loan.lenders.length; i++) {
                 uint lenderRepayment = _loan.lenderPledges[_loan.lenders[i]].add(_loan.lenderInterests[_loan.lenders[i]]).add(_loan.lenderOverdueFees[_loan.lenders[i]]);
                 Coin.transfer(_loan.lenders[i], lenderRepayment);
             }
-            _loan.currentLoanState = LoanState.OVERDUECLOSED;
-            borrowerActiveOverdue(_borrower);
             _transitionToRequestState(RequestState.CLOSED, _borrower);
+        } else if(to == LoanState.OVERDUE){
+            require(_loan.currentLoanState == LoanState.ACTIVE, 'can only go to overdue from active'); 
+            setOverdueFees(_borrower);
+           _loan.currentLoanState = LoanState.OVERDUE;
         }
+        borrowerActiveOverdue(_borrower);
     }
 }
