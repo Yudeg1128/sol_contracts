@@ -1,0 +1,304 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.0;
+
+contract FiatLender {
+        
+    address private owner; 
+
+    constructor(
+        ) {
+        owner = msg.sender;
+    }
+    
+    enum RequestState {
+        PENDING,
+        FILLED,
+        CLOSED
+    }
+
+    enum LoanState {
+        ACTIVE,
+        CLOSED,
+        OVERDUE,
+        OVERDUECLOSED
+    }
+    
+    struct Request {
+        uint borrowerId;
+        bytes32[] lenders;
+        mapping (bytes32 => uint) lenderPledges;
+        mapping (bytes32 => uint) lenderInterests;
+        mapping (bytes32 => uint) platformLenderFees;
+        uint timestamp;
+        uint amount;
+        uint tenor; //seconds
+        uint interest;
+        uint pledge;
+        RequestState currentRequestState;
+    }
+    
+    struct Loan {
+        uint id;
+        uint borrowerId;
+        bytes32[] lenders;
+        mapping (bytes32 => uint) lenderPledges;
+        mapping (bytes32 => uint) lenderInterests;
+        mapping (bytes32 => uint) platformLenderFees;
+        mapping (bytes32 => uint) lenderOverdueFees;
+        uint amount;
+        uint tenor; //seconds
+        uint interest;
+        uint overdueFee;
+        uint platformBorrowerFee;
+        uint platformLenderFee;
+        uint start;
+        uint end;
+        LoanState currentLoanState;
+    }
+
+    struct Borrower {
+        uint id;
+        uint date;
+        bytes32[] accounts;
+        uint[] loans;
+    }
+
+    struct Lender {
+        uint[] pledgedRequests;
+        uint[] fundedLoans;
+    }
+    
+    // map structs to their unique ids - ids must start from 1 not 0!!!
+    mapping (uint => Request) public requests; // key IS borrowerId, because only 1 request per borrower!
+    mapping (uint => Loan) public loans; // key is NOT borrowerId, it's its own ID!
+    mapping (uint => Borrower) public borrowers;
+    mapping (bytes32 => Lender) lenders;
+
+    // track the last ids
+    uint public loanIds = 0;
+    uint public borrowerIds = 0;
+
+    // track all existing accounts to borrower ids
+    mapping (bytes32 => uint) public borrowerAccounts;
+
+    // helpful variables
+    uint public piggybank = 0;
+    uint oneDay = 600; //use 86400 seconds for 24 hours
+    uint public overdueFeePerDay = 1; //pct per day
+    uint public platformBorrowerFee = 1; // parts per 1000
+    uint public platformLenderFee = 1; // parts per 1000
+
+    // check if a bank account has been used by a borrower
+    function borrowerExists(bytes32[] memory _accounts) view public returns(uint) {
+        uint checkPlaceholder = 0;
+        for(uint  i; i < _accounts.length; i++) {
+            bytes32 _account = _accounts[i];
+            checkPlaceholder += borrowerAccounts[_account];
+        }
+        return checkPlaceholder;
+    }
+
+    // create a new borrower struct
+    function createBorrower(bytes32[] memory _accounts) external returns(uint) {
+        require(msg.sender == owner, "only owner can create borrowers");
+        require(borrowerExists(_accounts) == 0, "borrower already exists");
+        borrowerIds += 1;
+        Borrower storage _borrower = borrowers[borrowerIds];
+        _borrower.id = borrowerIds;
+        _borrower.date = block.timestamp;
+        _borrower.accounts = _accounts;
+
+        for(uint i; i < _accounts.length; i++) {
+            borrowerAccounts[_accounts[i]] = borrowerIds;
+        }
+        return borrowerIds;
+    }
+
+    // if existing borrower uses a new account, add it to the Borrower struct
+    function addBorrowerAccount(uint _borrowerId, bytes32 _account) external {
+        require(msg.sender == owner, "only owner can add borrower accounts");
+        Borrower storage _borrower = borrowers[_borrowerId];
+        _borrower.accounts.push(_account);
+    }
+
+    // check if borrower already has an active or overdue loan outstanding
+    function checkActiveOverdue(uint _borrowerId) view internal returns(bool) {
+        uint checkPlaceholder = 0;
+        Borrower storage _borrower = borrowers[_borrowerId];
+        uint[] memory _loans = _borrower.loans;
+        for(uint i; i < _loans.length; i++) {
+            uint _loanId = _loans[i];
+            Loan storage _loan = loans[_loanId];
+            if(_loan.currentLoanState == LoanState.ACTIVE || _loan.currentLoanState == LoanState.OVERDUE) {
+                checkPlaceholder++;
+            }
+        }
+        if(checkPlaceholder == 0) {
+            return false;
+        } else {
+            return true;
+        }
+
+    }
+
+    // create a new request for a loan
+    function createRequest(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
+        require(msg.sender == owner, "only owner can create requests");
+        require(checkActiveOverdue(_borrowerId) == false, "borrower already has an active or overdue loan");
+        Request storage _request = requests[_borrowerId];
+        _request.borrowerId = _borrowerId;
+        _request.timestamp = block.timestamp;
+        _request.amount = _amount;
+        _request.tenor = _tenor;
+        _request.interest = _interest;
+        _request.currentRequestState = RequestState.PENDING;
+    }
+
+    // check accepted amount of pledge made by a lender
+    function checkAcceptedPledge(uint _borrowerId, uint _pledgeAmount) view external returns(uint) {
+        require(msg.sender == owner, "only owner can create pledges");
+        require(_pledgeAmount > 0, "pledge must be larger than 0");
+        Request storage _request = requests[_borrowerId];
+        require(_request.currentRequestState == RequestState.PENDING, "can pledge only to pending requests");
+        if(_request.amount >= (_request.pledge + _pledgeAmount)) {
+            return _pledgeAmount;
+        } else {
+            return (_request.pledge + _pledgeAmount) - _request.amount; // this uint will always be different than _pledgeAmount
+        }
+    }
+
+    // a lender makes a pledge with an accepted amount - frontend must first check pledge amount was wired inter-bank!
+    function createPledge(bytes32 _account, uint _borrowerId, uint _acceptedPledge) external returns(bool) {
+        require(msg.sender == owner, "only owner can create pledges");
+        Request storage _request = requests[_borrowerId];
+        require((_acceptedPledge + _request.pledge) <= _request.amount, "pledge cannot exceed amount");
+        Lender storage _lender = lenders[_account];
+        _request.lenders.push(_account);
+        _request.lenderPledges[_account] = _acceptedPledge;
+        _request.lenderInterests[_account] = (_request.interest * _acceptedPledge) / _request.amount;
+        _request.platformLenderFees[_account] = (platformLenderFee * _acceptedPledge) / 1000;
+        _request.pledge += _acceptedPledge;
+
+        _lender.pledgedRequests.push(_borrowerId);
+        piggybank += _acceptedPledge;
+
+        if(_request.pledge == _request.amount) {
+            createLoan(_request.borrowerId);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    // if request did not fill, close it
+    function closeRequest(uint _requestId) external {
+        require(msg.sender == owner, "only owner can close requests");
+        Request storage _request = requests[_requestId];
+        require(_request.currentRequestState == RequestState.PENDING, "can only close a pending request");
+        _request.currentRequestState = RequestState.CLOSED;
+    }
+
+    // if request pledge fills, create a new loan - frontend must transfer the loan amount to borrower first!
+    function createLoan(uint _borrowerId) internal {
+        Request storage _request = requests[_borrowerId];
+        require(_request.currentRequestState == RequestState.PENDING, "can only create new loan from a pending request");
+        loanIds += 1;
+        Loan storage _loan = loans[loanIds];
+        _loan.id = loanIds;
+        _loan.borrowerId = _borrowerId;
+        _loan.lenders = _request.lenders;
+        for(uint i; i < _request.lenders.length; i++) {
+            bytes32 _lender = _request.lenders[i];
+            _loan.lenderPledges[_lender] = _request.lenderPledges[_lender];
+            _loan.lenderInterests[_lender] = _request.lenderInterests[_lender];
+            _loan.platformLenderFees[_lender] = _request.platformLenderFees[_lender];
+        }
+        _loan.amount = _request.amount;
+        _loan.tenor = _request.tenor;
+        _loan.interest = _request.interest;
+        _loan.platformBorrowerFee = (_request.amount * platformBorrowerFee) / 1000;
+        _loan.platformLenderFee = (_request.amount * platformLenderFee) / 1000;
+        _loan.start = block.timestamp;
+        _loan.end = block.timestamp + _request.tenor;
+        _loan.currentLoanState = LoanState.ACTIVE;
+        _request.currentRequestState = RequestState.FILLED;
+        piggybank -= _request.amount;
+
+        Borrower storage _borrower = borrowers[_borrowerId];
+        _borrower.loans.push(loanIds);
+        for(uint i; i < _request.lenders.length; i++) {
+            bytes32 _account = _request.lenders[i];
+            Lender storage _lender = lenders[_account];
+            _lender.fundedLoans.push(loanIds);
+        }
+    }
+
+    // scan for overdue loans
+    function scanOverdueLoans() public {
+        for(uint i=1; i <= loanIds; i++) {
+            Loan storage _loan = loans[i];
+            if(block.timestamp > (_loan.end + oneDay)) {
+                if(_loan.currentLoanState == LoanState.ACTIVE || _loan.currentLoanState == LoanState.OVERDUE)  {
+                    uint overdueSeconds = block.timestamp - (_loan.end + oneDay);
+                    uint _overdueFee = ((overdueSeconds / oneDay + 1) * overdueFeePerDay) * (_loan.amount / 100);
+                    _loan.overdueFee = _overdueFee;
+                    for(uint j; j < _loan.lenders.length; j++) {
+                        bytes32 _lender = _loan.lenders[j];
+                        _loan.lenderOverdueFees[_lender] = (((_loan.lenderPledges[_lender] * 100) / _loan.amount) * _overdueFee) / 100;
+                    }  
+                    _loan.currentLoanState = LoanState.OVERDUE;
+                }
+            }        
+        }
+    }
+
+    // repay an active or overdue loan - frontend must check if borrower has wired the amount!
+    function repayLoan(uint _loanId, uint _repayAmount) external {
+        require(msg.sender == owner, "only owner can repay loans");
+        Loan storage _loan = loans[_loanId];
+        require(_loan.end < block.timestamp, "loan not due yet");
+        require(_loan.currentLoanState == LoanState.ACTIVE || _loan.currentLoanState == LoanState.OVERDUE, "not an active or overdue loan");
+        uint loanRepayAmount = _loan.amount + _loan.interest + _loan.overdueFee + _loan.platformBorrowerFee;
+        require(_repayAmount >= loanRepayAmount, "not enough funds to repay loan");
+        if(_loan.currentLoanState == LoanState.ACTIVE) {
+            _loan.currentLoanState = LoanState.CLOSED;
+        } else if(_loan.currentLoanState == LoanState.OVERDUE) {
+            _loan.currentLoanState = LoanState.OVERDUECLOSED;
+        }
+        piggybank += (_loan.platformBorrowerFee + _loan.platformLenderFee);
+    }
+    
+    function viewRequestLenders(uint _borrowerId) view public returns(bytes32[] memory) {
+        return requests[_borrowerId].lenders;
+    }
+
+    function viewRequestPledges(uint _borrowerId, bytes32 _lender) view public returns(uint) {
+        return requests[_borrowerId].lenderPledges[_lender];
+    }
+
+    function viewRequestInterests(uint _borrowerId, bytes32 _lender) view public returns(uint) {
+        return requests[_borrowerId].lenderInterests[_lender];
+    }
+
+    function viewLoanLenders(uint _loanId) view public returns(bytes32[] memory) {
+        return loans[_loanId].lenders;
+    }
+
+    function viewLoanPledges(uint _loanId, bytes32 _lender) view public returns(uint) {
+        return loans[_loanId].lenderPledges[_lender];
+    }
+
+    function viewLoanInterests(uint _loanId, bytes32 _lender) view public returns(uint) {
+        return loans[_loanId].lenderInterests[_lender];
+    }
+    
+    function viewLoanOverdueFees(uint _loanId, bytes32 _lender) view public returns(uint) {
+        return loans[_loanId].lenderOverdueFees[_lender];
+    }
+    
+    function viewLoanPlatformLenderFees(uint _loanId, bytes32 _lender) view public returns(uint) {
+        return loans[_loanId].platformLenderFees[_lender];
+    }
+    
+}
