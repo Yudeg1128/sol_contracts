@@ -40,17 +40,14 @@ contract ComboLender {
         bool stablecoinTx;
         uint borrowerId;
         uint[] lenderIds;
-        mapping (uint => uint) lenderPledges;           // lender id => amount
-        mapping (uint => uint) lenderInterests;         // lender id => amount
-        mapping (uint => uint) lenderPlatformFees;      // lender id => amount
-        mapping (uint => uint) lenderOverdueFees;       // lender id => amount
-        uint pledge;
+        mapping (uint => uint[]) lenderData; // lender id => [lenderPledges;lenderInterests;lenderPlatformFees;lenderOverdueFees;] 
         uint amount;
         uint tenor; //seconds
         uint interest;
         uint overdueFee;
+        uint pledge;
         uint[2] platformFees; // [borrowerPlatformFee, lenderPlatformFee] to aviod StackTooDeep
-        uint[3] dates; // [createDate; start; end;] to aviod StackTooDeep
+        uint[4] dates; // [createDate; start; end; closed] to aviod StackTooDeep
         State currentState;
     }
 
@@ -99,7 +96,7 @@ contract ComboLender {
     uint public platformFeeBase = 200; // from the added value i.e. interest
     uint public minPlatformFee = 1; // has to be an int
 
-    // define an array of approved stablecoin lender addresses
+    // define a list of approved stablecoin lender addresses
     mapping (address => bool) public approvedStablecoinLenders;
 
     function addStablecoinLender(address _address) external {
@@ -242,16 +239,16 @@ contract ComboLender {
         require((_acceptedPledge + _loan.pledge) <= _loan.amount, "pledge cannot exceed amount");
         lenderIds += 1;
         _loan.lenderIds.push(lenderIds);
-        _loan.lenderPledges[lenderIds] = _acceptedPledge;
+        _loan.lenderData[lenderIds][0] = _acceptedPledge;
         uint _lenderInterest = (_loan.interest * _acceptedPledge) / _loan.amount;
-        _loan.lenderInterests[lenderIds] = _lenderInterest;
+        _loan.lenderData[lenderIds][1] = _lenderInterest;
         uint _lenderPlatformFee = lenderPlatformFee * _lenderInterest / platformFeeBase;
         if(_lenderPlatformFee > minPlatformFee) {
-            _loan.lenderPlatformFees[lenderIds] = _lenderPlatformFee;
+            _loan.lenderData[lenderIds][2] = _lenderPlatformFee;
             _loan.platformFees[1] += _lenderPlatformFee;
         } else {
-            _loan.lenderPlatformFees[lenderIds] = minPlatformFee;
-            _loan.platformFees[1] = _lenderPlatformFee;
+            _loan.lenderData[lenderIds][2] = minPlatformFee;
+            _loan.platformFees[1] += minPlatformFee;
         }
         _loan.pledge += _acceptedPledge;
 
@@ -293,7 +290,7 @@ contract ComboLender {
                     _loan.overdueFee = _overdueFee;
                     for(uint j; j < _loan.lenderIds.length; j++) {
                         uint _lenderId = _loan.lenderIds[j];
-                        _loan.lenderOverdueFees[_lenderId] = (((_loan.lenderPledges[_lenderId] * 100) / _loan.amount) * _overdueFee) / 100;
+                        _loan.lenderData[_lenderId][3] = (((_loan.lenderData[_lenderId][0] * 100) / _loan.amount) * _overdueFee) / 100;
                     }
 
                     if(_loan.currentState == State.ACTIVE) {
@@ -318,7 +315,7 @@ contract ComboLender {
             require(loanRepayAmount <= stablecoin.balanceOf(address(this)) - piggybankCoin, "lender contract balance not enough");
             for(uint  i; i < _loan.lenderIds.length; i++) {
                 uint _lenderId = _loan.lenderIds[i];
-                uint _lenderRepayment = _loan.lenderPledges[_lenderId] + _loan.lenderInterests[_lenderId] + _loan.lenderOverdueFees[_lenderId] - _loan.lenderPlatformFees[_lenderId];
+                uint _lenderRepayment = _loan.lenderData[_lenderId][0] + _loan.lenderData[_lenderId][1] + _loan.lenderData[_lenderId][3] - _loan.lenderData[_lenderId][2];
                 stablecoin.transfer(lenders[_lenderId].lenderAddress, _lenderRepayment);
             }
         }
@@ -335,6 +332,7 @@ contract ComboLender {
 
         if(_from == State.PENDING && _to == State.INACTIVECLOSED) {
             require(_loan.currentState == State.PENDING, "can transition to inactiveclosed only from pending");
+            _loan.dates[3] = block.timestamp;
             _loan.currentState = State.INACTIVECLOSED;
         } else if (_from == State.PENDING && _to == State.ACTIVE) {
             require(_loan.currentState == State.PENDING, "can transition to active only from pending");
@@ -343,6 +341,7 @@ contract ComboLender {
             _loan.currentState = State.ACTIVE;            
         } else if(_from == State.ACTIVE && _to == State.CLOSED) {
             require(_loan.currentState == State.ACTIVE, "can transition to closed only from active");
+            _loan.dates[3] = block.timestamp;
             _loan.currentState = State.CLOSED;
             if(_loan.stablecoinTx) {
                 piggybankCoin += (_loan.platformFees[0] + _loan.platformFees[1]);
@@ -355,6 +354,7 @@ contract ComboLender {
             _loan.currentState = State.OVERDUE;
         } else if(_from == State.OVERDUE && _to == State.OVERDUECLOSED) {
             require(_loan.currentState == State.OVERDUE, "can transition to closed only from active");
+            _loan.dates[3] = block.timestamp;
             _loan.currentState = State.OVERDUECLOSED;
             if(_loan.stablecoinTx) {
                 piggybankCoin += (_loan.platformFees[0] + _loan.platformFees[1]);
@@ -368,27 +368,15 @@ contract ComboLender {
         return loans[_loanId].lenderIds;
     }
 
-    function viewLoanPledges(uint _loanId, uint _lenderId) view public returns(uint) {
-        return loans[_loanId].lenderPledges[_lenderId];
-    }
-
-    function viewLoanInterests(uint _loanId, uint _lenderId) view public returns(uint) {
-        return loans[_loanId].lenderInterests[_lenderId];
-    }
-    
-    function viewLoanOverdueFees(uint _loanId, uint _lenderId) view public returns(uint) {
-        return loans[_loanId].lenderOverdueFees[_lenderId];
-    }
-    
-    function viewLoanLenderPlatformFees(uint _loanId, uint _lenderId) view public returns(uint) {
-        return loans[_loanId].lenderPlatformFees[_lenderId];
+    function viewLoanLenderData(uint _loanId, uint _lenderId) view public returns(uint[] memory) {
+        return loans[_loanId].lenderData[_lenderId];
     }
 
     function viewLoanPlatformFees(uint _loanId) view public returns(uint[2] memory) {
         return loans[_loanId].platformFees;
     }
 
-    function viewLoanDates(uint _loanId) view public returns(uint[3] memory) {
+    function viewLoanDates(uint _loanId) view public returns(uint[4] memory) {
         return loans[_loanId].dates;
     }
 
@@ -435,20 +423,24 @@ contract InterfaceUSDT {
     }
 
     function createBorrower(address _borrowerAddress) external returns(uint) {
+        require(msg.sender == owner, "only owner");
         bytes32[] memory _accounts;
         return lenderContract.createBorrower(_accounts, _borrowerAddress);
     }
 
     function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
+        require(msg.sender == owner, "only owner");
         lenderContract.createLoan(_borrowerId, _amount, _tenor, _interest);
     }
 
     function createPledge(address _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
+        require(msg.sender == owner, "only owner");
         bytes32[] memory _accounts;
         return lenderContract.createPledge(_accounts, _lenderAddress, _loanId, _acceptedPledge);
     }
 
     function repayLoan(uint _loanId, uint _repayAmount) external {
+        require(msg.sender == owner, "only owner");
         lenderContract.repayLoan(_loanId, _repayAmount);        
     }
 
