@@ -40,7 +40,7 @@ contract ComboLender {
         bool stablecoinTx;
         uint borrowerId;
         uint[] lenderIds;
-        mapping (uint => uint[]) lenderData; // lender id => [lenderPledges;lenderInterests;lenderPlatformFees;lenderOverdueFees;] 
+        mapping (uint => uint[4]) lenderData; // lender id => [lenderPledges;lenderInterests;lenderPlatformFees;lenderOverdueFees;] 
         uint amount;
         uint tenor; //seconds
         uint interest;
@@ -55,16 +55,14 @@ contract ComboLender {
         uint id;
         uint date;
         uint[] loans;
-        bytes32[] accounts;
-        address borrowerAddress;
+        bool stablecoinTx;
     }
 
     struct Lender {
         uint id;
         uint date;
         uint[] loans;
-        bytes32[] accounts;
-        address lenderAddress;
+        bool stablecoinTx;
     }
     
     // map structs to their unique ids - ids must start from 1 not 0!!!
@@ -72,23 +70,24 @@ contract ComboLender {
     mapping (uint => Borrower) public borrowers;
     mapping (uint => Lender) public lenders;
 
-    // track overdue loans
-    uint[] overdueLoans;
-
     // track the last ids
     uint public loanIds;
     uint public borrowerIds;
     uint public lenderIds;
 
     // track all existing accounts and addresses to ids
-    mapping (bytes32 => uint) public borrowerAccounts;
-    mapping (bytes32 => uint) public lenderAccounts;
-    mapping (address => uint) public borrowerAddresses;
-    mapping (address => uint) public lenderAddresses;
+    mapping (bytes32 => uint) public accountToBorrower;
+    mapping (bytes32 => uint) public accountToLender;
+    mapping (address => uint) public addressToBorrower;
+    mapping (address => uint) public addressToLender;
+    mapping (uint => bytes32) public borrowerToAccount;
+    mapping (uint => bytes32) public lenderToAccount;
+    mapping (uint => address) public borrowerToAddress;
+    mapping (uint => address) public lenderToAddress;
 
     // helpful variables
-    uint public piggybankFiat = 0; //tracking all fiat fees
-    uint public piggybankCoin = 0; //tracking all stablecoin fees
+    uint public piggybankFiat; //tracking all fiat fees
+    uint public piggybankCoin; //tracking all stablecoin fees
     uint oneDay = 600; //use 86400 seconds for 24 hours
     uint public overdueFeePerDay = 1; //pct per day
     uint public borrowerPlatformFee = 1; // parts per platformFeeBase
@@ -105,61 +104,46 @@ contract ComboLender {
     }
 
     // check if an account or address has been used by a borrower
-    function borrowerExists(bytes32[] memory _accounts, address _borrowerAddress) view public returns(uint) {
-        uint checkPlaceholder = 0;
-        for(uint  i; i < _accounts.length; i++) {
-            bytes32 _account = _accounts[i];
-            checkPlaceholder += borrowerAccounts[_account];
+    function borrowerExists(bytes32[] memory _account, address[] memory _borrowerAddress) view public returns(uint) {
+        uint checkPlaceholder;
+        if(_account.length == 0) {
+            checkPlaceholder += addressToBorrower[_borrowerAddress[0]];
+        } else if(_borrowerAddress.length == 0) {
+            checkPlaceholder += accountToBorrower[_account[0]];
         }
-        checkPlaceholder += borrowerAddresses[_borrowerAddress];
-
         return checkPlaceholder;
     }
 
     // check if an account or address has been used by a lender
-    function lenderExists(bytes32[] memory _accounts, address _lenderAddress) view public returns(uint) {
-        uint checkPlaceholder = 0;
-        for(uint  i; i < _accounts.length; i++) {
-            bytes32 _account = _accounts[i];
-            checkPlaceholder += lenderAccounts[_account];
+    function lenderExists(bytes32[] memory _account, address[] memory _lenderAddress) view public returns(uint) {
+        uint checkPlaceholder;
+        if(_account.length == 0) {
+            checkPlaceholder += addressToLender[_lenderAddress[0]];
+        } else if(_lenderAddress.length == 0) {
+            checkPlaceholder += accountToLender[_account[0]];
         }
-        checkPlaceholder += lenderAddresses[_lenderAddress];
-
         return checkPlaceholder;
     }
 
-    // create a new borrower struct
-    function createBorrower(bytes32[] memory _accounts, address _borrowerAddress) external returns(uint) {
+    // create a new borrower struct - function args are array to avoid inputting 0x0
+    function createBorrower(bytes32[] memory _account, address[] memory _borrowerAddress) external returns(uint) {
         require(msg.sender == owner || approvedStablecoinLenders[msg.sender], "only owner or approved stablecoin lender contracts can create borrowers");
-        require(borrowerExists(_accounts, _borrowerAddress) == 0, "borrower already exists");
+        require(_account.length == 1 || _borrowerAddress.length == 1, "must input 1 account or address");
+        require(borrowerExists(_account, _borrowerAddress) == 0, "borrower already exists");
         borrowerIds += 1;
         Borrower storage _borrower = borrowers[borrowerIds];
         _borrower.id = borrowerIds;
         _borrower.date = block.timestamp;
-        _borrower.accounts = _accounts;
-
-        for(uint i; i < _accounts.length; i++) {
-            borrowerAccounts[_accounts[i]] = borrowerIds;
+        if(approvedStablecoinLenders[msg.sender]) {
+            _borrower.stablecoinTx = true;
+            borrowerToAddress[borrowerIds] = _borrowerAddress[0];
+            addressToBorrower[_borrowerAddress[0]] = borrowerIds;
+        } else {
+            borrowerToAccount[borrowerIds] = _account[0];
+            accountToBorrower[_account[0]] = borrowerIds;
         }
 
-        _borrower.borrowerAddress = _borrowerAddress;
-        borrowerAddresses[_borrowerAddress] = borrowerIds;
-
         return borrowerIds;
-    }
-
-    // if existing borrower uses a new account, add it to the Borrower struct
-    function addBorrowerAccount(uint _borrowerId, bytes32 _account) external {
-        require(msg.sender == owner, "only owner can add borrower accounts");
-        Borrower storage _borrower = borrowers[_borrowerId];
-        _borrower.accounts.push(_account);
-    }
-
-    // if existing borrower uses a new account, add it to the Borrower struct
-    function addLenderAccount(uint _lenderId, bytes32 _account) external {
-        require(msg.sender == owner, "only owner can add borrower accounts");
-        Lender storage _lender = lenders[_lenderId];
-        _lender.accounts.push(_account);
     }
 
     // check if borrower already has an active or overdue loan outstanding
@@ -232,9 +216,15 @@ contract ComboLender {
     }
 
     // a lender makes a pledge with an accepted amount - frontend must first check pledge amount was wired inter-bank or on etherscan!
-    function createPledge(bytes32[] memory _accounts, address _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
+    function createPledge(bytes32[] memory _account, address[] memory _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
         require(msg.sender == owner || approvedStablecoinLenders[msg.sender], "only owner or approved stablecoin lender contracts can create borrowers");
+        require(_account.length == 1 || _lenderAddress.length == 1, "must input 1 account or address");
         Loan storage _loan = loans[_loanId];
+        if(msg.sender == owner) {
+            require(_loan.stablecoinTx == false, "stablecoin loans must be funded by stablecoin.Tx == true lenders with valid address");
+        } else if(approvedStablecoinLenders[msg.sender]) {
+            require(_loan.stablecoinTx == true, "fiat loans must be funded by fiat lender with valid bank/credit card accounts");
+        }
         require(_loan.currentState == State.PENDING, "can pledge only to pending loans");
         require((_acceptedPledge + _loan.pledge) <= _loan.amount, "pledge cannot exceed amount");
         lenderIds += 1;
@@ -255,14 +245,16 @@ contract ComboLender {
         Lender storage _lender = lenders[lenderIds];
         _lender.loans.push(_loanId);
 
-        if(lenderExists(_accounts, _lenderAddress) == 0) {
+        if(lenderExists(_account, _lenderAddress) == 0) {
             _lender.id = lenderIds;
             _lender.date = block.timestamp;
-            _lender.accounts = _accounts;
-            for(uint i; i < _accounts.length; i++) {
-                lenderAccounts[_accounts[i]] = lenderIds;
+            if(approvedStablecoinLenders[msg.sender]) {
+                lenderToAddress[lenderIds] = _lenderAddress[0];
+                addressToLender[_lenderAddress[0]] = lenderIds;
+            } else {
+                lenderToAccount[lenderIds] = _account[0];
+                accountToLender[_account[0]] = lenderIds;
             }
-            _lender.lenderAddress = _lenderAddress;           
         }
 
         if(_loan.pledge == _loan.amount) {
@@ -270,7 +262,7 @@ contract ComboLender {
                 stablecoinLender = StablecoinLender(msg.sender);
                 stablecoin = StableToken(stablecoinLender.stablecoin_address());
                 require(stablecoin.balanceOf(address(this)) - piggybankCoin >= _loan.amount, "lender contract balance not enough");
-                stablecoin.transfer(borrowers[_loan.borrowerId].borrowerAddress, _loan.amount);
+                stablecoin.transfer(borrowerToAddress[_loan.borrowerId], _loan.amount);
             }
             stateMachine(State.PENDING, State.ACTIVE, _loanId);
             return true;
@@ -316,7 +308,7 @@ contract ComboLender {
             for(uint  i; i < _loan.lenderIds.length; i++) {
                 uint _lenderId = _loan.lenderIds[i];
                 uint _lenderRepayment = _loan.lenderData[_lenderId][0] + _loan.lenderData[_lenderId][1] + _loan.lenderData[_lenderId][3] - _loan.lenderData[_lenderId][2];
-                stablecoin.transfer(lenders[_lenderId].lenderAddress, _lenderRepayment);
+                stablecoin.transfer(lenderToAddress[_lenderId], _lenderRepayment);
             }
         }
         if(_loan.currentState == State.ACTIVE) {
@@ -350,7 +342,6 @@ contract ComboLender {
             }
         } else if(_from == State.ACTIVE && _to == State.OVERDUE) {
             require(_loan.currentState == State.ACTIVE, "can transition to overdue only from active");
-            overdueLoans.push(_loanId);
             _loan.currentState = State.OVERDUE;
         } else if(_from == State.OVERDUE && _to == State.OVERDUECLOSED) {
             require(_loan.currentState == State.OVERDUE, "can transition to closed only from active");
@@ -368,7 +359,7 @@ contract ComboLender {
         return loans[_loanId].lenderIds;
     }
 
-    function viewLoanLenderData(uint _loanId, uint _lenderId) view public returns(uint[] memory) {
+    function viewLoanLenderData(uint _loanId, uint _lenderId) view public returns(uint[4] memory) {
         return loans[_loanId].lenderData[_lenderId];
     }
 
@@ -385,23 +376,9 @@ contract ComboLender {
         return _borrower.loans;
     }
 
-    function viewBorrowerAccounts(uint _borrowerId) view public returns(bytes32[] memory) {
-        Borrower storage _borrower = borrowers[_borrowerId];
-        return _borrower.accounts;
-    }
-
     function viewLenderLoans(uint _lenderId) view public returns(uint[] memory) {
         Lender storage _lender = lenders[_lenderId];
         return _lender.loans;
-    }
-
-    function viewLenderAccounts(uint _lenderId) view public returns(bytes32[] memory) {
-        Lender storage _lender = lenders[_lenderId];
-        return _lender.accounts;
-    }
-
-    function viewOverdueLoans() view public returns(uint[] memory) {
-        return overdueLoans;
     }
 
 }
@@ -422,10 +399,10 @@ contract InterfaceUSDT {
         lenderContract = ComboLender(_lender_address);
     }
 
-    function createBorrower(address _borrowerAddress) external returns(uint) {
+    function createBorrower(address[] memory _borrowerAddress) external returns(uint) {
         require(msg.sender == owner, "only owner");
-        bytes32[] memory _accounts;
-        return lenderContract.createBorrower(_accounts, _borrowerAddress);
+        bytes32[] memory _account;
+        return lenderContract.createBorrower(_account, _borrowerAddress);
     }
 
     function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
@@ -433,10 +410,10 @@ contract InterfaceUSDT {
         lenderContract.createLoan(_borrowerId, _amount, _tenor, _interest);
     }
 
-    function createPledge(address _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
+    function createPledge(address[] memory _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
         require(msg.sender == owner, "only owner");
-        bytes32[] memory _accounts;
-        return lenderContract.createPledge(_accounts, _lenderAddress, _loanId, _acceptedPledge);
+        bytes32[] memory _account;
+        return lenderContract.createPledge(_account, _lenderAddress, _loanId, _acceptedPledge);
     }
 
     function repayLoan(uint _loanId, uint _repayAmount) external {
