@@ -98,9 +98,17 @@ contract ComboLender {
     // define a list of approved stablecoin lender addresses
     mapping (address => bool) public approvedStablecoinLenders;
 
+    // blacklist of borrowers
+    mapping (uint => bool) public blacklist;
+
     function addStablecoinLender(address _address) external {
         require(msg.sender == owner, "only owner can add stablecoin lender");
         approvedStablecoinLenders[_address] = true;
+    }
+
+    function addBlacklist(uint _borrowerId) external {
+        require(msg.sender == owner, "only owner can blacklist");
+        blacklist[_borrowerId] = true;
     }
 
     // check if an account or address has been used by a borrower
@@ -170,6 +178,7 @@ contract ComboLender {
     function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
         require(msg.sender == owner || approvedStablecoinLenders[msg.sender], "only owner or approved stablecoin lender contracts can create borrowers");
         require(checkActiveOverdue(_borrowerId) == false, "borrower already has an active or overdue loan");
+        require(_borrowerId <= borrowerIds, "borrower does not exist");
         loanIds += 1;        
         Loan storage _loan = loans[loanIds];
         _loan.id = loanIds;
@@ -227,35 +236,42 @@ contract ComboLender {
         }
         require(_loan.currentState == State.PENDING, "can pledge only to pending loans");
         require((_acceptedPledge + _loan.pledge) <= _loan.amount, "pledge cannot exceed amount");
-        lenderIds += 1;
-        _loan.lenderIds.push(lenderIds);
-        _loan.lenderData[lenderIds][0] = _acceptedPledge;
+        uint currentLenderId;
+        uint lenderExistsCheck = lenderExists(_account, _lenderAddress);
+        Lender storage _lender;
+        if(lenderExistsCheck == 0) {
+            lenderIds += 1;
+            currentLenderId = lenderIds;
+            _lender = lenders[currentLenderId];
+            _lender.id = currentLenderId;
+            _lender.date = block.timestamp;
+            if(approvedStablecoinLenders[msg.sender]) {
+                _lender.stablecoinTx = true;
+                lenderToAddress[currentLenderId] = _lenderAddress[0];
+                addressToLender[_lenderAddress[0]] = currentLenderId;
+            } else {
+                lenderToAccount[currentLenderId] = _account[0];
+                accountToLender[_account[0]] = currentLenderId;
+            }
+        } else {
+            currentLenderId = lenderExistsCheck;
+            _lender = lenders[currentLenderId];
+        }
+        _lender.loans.push(_loanId);
+
+        _loan.lenderIds.push(currentLenderId);
+        _loan.lenderData[currentLenderId][0] = _acceptedPledge;
         uint _lenderInterest = (_loan.interest * _acceptedPledge) / _loan.amount;
-        _loan.lenderData[lenderIds][1] = _lenderInterest;
+        _loan.lenderData[currentLenderId][1] = _lenderInterest;
         uint _lenderPlatformFee = lenderPlatformFee * _lenderInterest / platformFeeBase;
         if(_lenderPlatformFee > minPlatformFee) {
-            _loan.lenderData[lenderIds][2] = _lenderPlatformFee;
+            _loan.lenderData[currentLenderId][2] = _lenderPlatformFee;
             _loan.platformFees[1] += _lenderPlatformFee;
         } else {
-            _loan.lenderData[lenderIds][2] = minPlatformFee;
+            _loan.lenderData[currentLenderId][2] = minPlatformFee;
             _loan.platformFees[1] += minPlatformFee;
         }
         _loan.pledge += _acceptedPledge;
-
-        Lender storage _lender = lenders[lenderIds];
-        _lender.loans.push(_loanId);
-
-        if(lenderExists(_account, _lenderAddress) == 0) {
-            _lender.id = lenderIds;
-            _lender.date = block.timestamp;
-            if(approvedStablecoinLenders[msg.sender]) {
-                lenderToAddress[lenderIds] = _lenderAddress[0];
-                addressToLender[_lenderAddress[0]] = lenderIds;
-            } else {
-                lenderToAccount[lenderIds] = _account[0];
-                accountToLender[_account[0]] = lenderIds;
-            }
-        }
 
         if(_loan.pledge == _loan.amount) {
             if(_loan.stablecoinTx) {
@@ -379,46 +395,6 @@ contract ComboLender {
     function viewLenderLoans(uint _lenderId) view public returns(uint[] memory) {
         Lender storage _lender = lenders[_lenderId];
         return _lender.loans;
-    }
-
-}
-
-contract InterfaceUSDT {
-        
-    address owner; 
-    address public stablecoin_address; 
-
-    ComboLender lenderContract;
-
-    constructor(
-        address _USDT_address,
-        address _lender_address
-        ) {
-        owner = msg.sender;
-        stablecoin_address = _USDT_address;
-        lenderContract = ComboLender(_lender_address);
-    }
-
-    function createBorrower(address[] memory _borrowerAddress) external returns(uint) {
-        require(msg.sender == owner, "only owner");
-        bytes32[] memory _account;
-        return lenderContract.createBorrower(_account, _borrowerAddress);
-    }
-
-    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
-        require(msg.sender == owner, "only owner");
-        lenderContract.createLoan(_borrowerId, _amount, _tenor, _interest);
-    }
-
-    function createPledge(address[] memory _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
-        require(msg.sender == owner, "only owner");
-        bytes32[] memory _account;
-        return lenderContract.createPledge(_account, _lenderAddress, _loanId, _acceptedPledge);
-    }
-
-    function repayLoan(uint _loanId, uint _repayAmount) external {
-        require(msg.sender == owner, "only owner");
-        lenderContract.repayLoan(_loanId, _repayAmount);        
     }
 
 }
