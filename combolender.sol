@@ -44,6 +44,7 @@ contract ComboLender {
         uint amount;
         uint tenor; //seconds
         uint interest;
+        uint periods;
         uint overdueFee;
         uint pledge;
         uint[2] platformFees; // [borrowerPlatformFee, lenderPlatformFee] to aviod StackTooDeep
@@ -175,7 +176,7 @@ contract ComboLender {
     }
 
     // create a new loan
-    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
+    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest, uint _periods) external {
         require(msg.sender == owner || approvedStablecoinLenders[msg.sender], "only owner or approved stablecoin lender contracts can create borrowers");
         require(checkActiveOverdue(_borrowerId) == false, "borrower already has an active or overdue loan");
         require(_borrowerId <= borrowerIds, "borrower does not exist");
@@ -190,6 +191,7 @@ contract ComboLender {
         _loan.amount = _amount;
         _loan.tenor = _tenor;
         _loan.interest = _interest;
+        _loan.periods = _periods;
         uint _borrowerPlatformFeeRaw = borrowerPlatformFee * _interest / platformFeeBase;
         if(_borrowerPlatformFeeRaw > minPlatformFee) {
             _loan.platformFees[0] = _borrowerPlatformFeeRaw; 
