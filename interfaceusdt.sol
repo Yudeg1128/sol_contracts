@@ -5,7 +5,7 @@ pragma solidity ^0.8.0;
 abstract contract ComboLender {
     uint public decimals;
     function createBorrower(bytes32[] memory _account, address[] memory _borrowerAddress) external virtual returns(uint);
-    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external virtual;
+    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest, uint _periods) external virtual;
     function createPledge(bytes32[] memory _account, address[] memory _lenderAddress, uint _loanId, uint _acceptedPledge) external virtual returns(bool);
     function repayLoan(uint _loanId, uint _repayAmount) external virtual;
 }
@@ -32,9 +32,9 @@ contract InterfaceUSDT {
         return lenderContract.createBorrower(_account, _borrowerAddress);
     }
 
-    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest) external {
+    function createLoan(uint _borrowerId, uint _amount, uint _tenor, uint _interest, uint _periods) external {
         require(msg.sender == owner, "only owner");
-        lenderContract.createLoan(_borrowerId, _amount, _tenor, _interest);
+        lenderContract.createLoan(_borrowerId, _amount, _tenor, _interest, _periods);
     }
 
     function createPledge(address[] memory _lenderAddress, uint _loanId, uint _acceptedPledge) external returns(bool) {
